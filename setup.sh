@@ -9,7 +9,7 @@ echo "=== MTProxy Bot Setup ==="
 
 # 1. Copy project files into /opt/telemt
 echo "[1/6] Copying files to $DEPLOY_DIR..."
-cp -r bot cron Dockerfile requirements.txt supervisord.conf "$DEPLOY_DIR/"
+cp -r mtproxy-bot.py log-cron.py Dockerfile requirements.txt supervisord.conf "$DEPLOY_DIR/"
 
 # 2. Copy .env (already has correct values)
 echo "[2/6] Installing .env..."
