@@ -7,6 +7,7 @@ import os
 import re
 import json
 import secrets
+import socket
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -394,13 +395,29 @@ def _shorten_error(error: str) -> str:
     return error[:30]
 
 
-# ── Start ─────────────────────────────────────────────────────────────────────
+# ── Start / status ────────────────────────────────────────────────────────────
+
+def check_proxy() -> tuple[bool, str]:
+    """TCP connect to the proxy port. Returns (ok, message)."""
+    try:
+        with socket.create_connection((PROXY_HOST, int(PROXY_PORT)), timeout=5):
+            return True, f"✅ Proxy reachable at {PROXY_HOST}:{PROXY_PORT}"
+    except OSError as e:
+        return False, f"❌ Proxy unreachable — {e}"
+
 
 @owner_only
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    doc = load_toml()
+    user_count = len(get_users(doc))
+    proxy_ok, proxy_status = check_proxy()
+
     await update.message.reply_text(
         "🛰 <b>mtproxy-bot</b>\n\n"
-        "Send <code>@username</code> to get or create a proxy key.\n\n"
+        f"{proxy_status}\n"
+        f"👥 Users: {user_count}\n\n"
+        "<b>Usage:</b>\n"
+        "Send <code>@username</code> — get or create a key\n\n"
         "<b>Commands:</b>\n"
         "/list — all users (paginated)\n"
         "/revoke @username — delete key\n"
