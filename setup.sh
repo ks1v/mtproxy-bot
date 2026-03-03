@@ -5,7 +5,7 @@ set -e
 
 DEPLOY_DIR="/opt/telemt"
 
-echo "=== Guroo Bot Setup ==="
+echo "=== MTProxy Bot Setup ==="
 
 # 1. Copy project files into /opt/telemt
 echo "[1/6] Copying files to $DEPLOY_DIR..."
