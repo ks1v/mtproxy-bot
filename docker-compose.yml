@@ -20,7 +20,7 @@ services:
         max-size: "50m"
         max-file: "3"
 
-  guroo-bot:
+  mtproxy-bot:
     build: .
     container_name: mtproxy-bot
     restart: unless-stopped
