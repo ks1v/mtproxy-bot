@@ -68,7 +68,7 @@ def gen_secret() -> str:
     return secrets.token_hex(16)
 
 def proxy_link(secret: str) -> str:
-    return f"https://t.me/proxy?server={PROXY_HOST}&port={PROXY_PORT}&secret=ee{secret}"
+    return f"tg://proxy?server={PROXY_HOST}&port={PROXY_PORT}&secret=ee{secret}"
 
 # ── Stats helpers ─────────────────────────────────────────────────────────────
 
@@ -120,7 +120,7 @@ async def send_user_card(chat_id, username: str, context, created: bool = None):
 
     text = (
         f"{icon} <b>{username}</b> — {status}\n\n"
-        f'<a href="{link}">🔗 Proxy link</a>\n\n'
+        f"{link} \n\n"
         f"<i>{INSTRUCTION}</i>"
     )
     await context.bot.send_message(
@@ -270,7 +270,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             text=(
                 f"🔄 <b>{username}</b> — key reset\n\n"
-                f'<a href="{link}">🔗 New proxy link</a>\n\n'
+                f"{link} \n\n"
                 f"<i>{INSTRUCTION}</i>"
             ),
             parse_mode="HTML",
