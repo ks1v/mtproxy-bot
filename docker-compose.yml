@@ -22,7 +22,7 @@ services:
 
   guroo-bot:
     build: .
-    container_name: guroo-bot
+    container_name: mtproxy-bot
     restart: unless-stopped
     group_add:
       - "${DOCKER_GID:-988}"
