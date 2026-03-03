@@ -13,7 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY mtproxy-bot.py .
-COPY log_cron.py .
+COPY log-cron.py .
 COPY supervisord.conf /etc/supervisor/conf.d/guroo-bot.conf
 
 # Pre-create /data and give ownership to botuser
