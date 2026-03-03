@@ -1,0 +1,14 @@
+[censorship]
+tls_domain = "1c.ru"
+
+[server]
+listen = "0.0.0.0:443"
+
+[mask]
+host = "1c.ru"
+port = 443
+
+[access.users]
+# format: telegram_username = "32 hex chars secret"
+# Generate a secret: openssl rand -hex 16
+# example = "00000000000000000000000000000000"

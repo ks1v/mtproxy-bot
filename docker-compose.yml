@@ -1,0 +1,41 @@
+services:
+
+  telemt:
+    image: whn0thacked/telemt-docker:latest
+    container_name: telemt
+    restart: unless-stopped
+    environment:
+      RUST_LOG: "info"
+    volumes:
+      - ./telemt.toml:/etc/telemt.toml:ro
+    ports:
+      - "443:443/tcp"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  guroo-bot:
+    build: .
+    container_name: guroo-bot
+    restart: unless-stopped
+    group_add:
+      - "${DOCKER_GID:-988}"
+    env_file:
+      - .env
+    environment:
+      PROXY_HOST: "89.125.209.103"
+      PROXY_PORT: "443"
+      TOML_PATH: "/data/telemt.toml"
+      STATS_PATH: "/data/stats.json"
+    volumes:
+      - ./telemt.toml:/data/telemt.toml
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - telemt
