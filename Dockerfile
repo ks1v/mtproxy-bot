@@ -12,8 +12,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot/     ./bot/
-COPY cron/    ./cron/
+COPY mtproxy-bot.py .
+COPY log_cron.py .
 COPY supervisord.conf /etc/supervisor/conf.d/guroo-bot.conf
 
 # Pre-create /data and give ownership to botuser
@@ -23,4 +23,4 @@ VOLUME ["/data"]
 
 USER botuser
 
-CMD ["supervisord", "-c", "/etc/supervisor/conf.d/guroo-bot.conf"]
+CMD ["supervisord", "-c", "/etc/supervisor/conf.d/mtproxy-bot.conf"]
