@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY mtproxy-bot.py .
 COPY log-cron.py .
 COPY supervisord.conf /etc/supervisor/conf.d/mtproxy-bot.conf
+RUN chmod 644 /etc/supervisor/conf.d/mtproxy-bot.conf
 
 # Pre-create /data and give ownership to botuser
 RUN mkdir -p /data && chown botuser:botuser /data
