@@ -31,6 +31,7 @@ services:
     environment:
       PROXY_HOST: "89.125.209.103"
       PROXY_PORT: "443"
+      PROXY_DOMAIN: "1c.ru"
       TOML_PATH: "/config/telemt.toml"
       STATS_PATH: "/data/stats.json"
     volumes:

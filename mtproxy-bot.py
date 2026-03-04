@@ -22,10 +22,11 @@ from telegram.ext import (
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN   = os.environ["BOT_TOKEN"]
 OWNER_ID    = int(os.environ["OWNER_ID"])
-PROXY_HOST  = os.environ.get("PROXY_HOST", "89.125.209.103")
-PROXY_PORT  = os.environ.get("PROXY_PORT", "443")
-TOML_PATH   = Path(os.environ.get("TOML_PATH", "/data/telemt.toml"))
-STATS_PATH  = Path(os.environ.get("STATS_PATH", "/data/stats.json"))
+PROXY_HOST   = os.environ.get("PROXY_HOST", "89.125.209.103")
+PROXY_PORT   = os.environ.get("PROXY_PORT", "443")
+PROXY_DOMAIN = os.environ.get("PROXY_DOMAIN", "")   # TLS fake-domain, e.g. "1c.ru"
+TOML_PATH    = Path(os.environ.get("TOML_PATH", "/data/telemt.toml"))
+STATS_PATH   = Path(os.environ.get("STATS_PATH", "/data/stats.json"))
 
 PAGE_SIZE = 10
 
@@ -70,7 +71,11 @@ def gen_secret() -> str:
     return secrets.token_hex(16)
 
 def proxy_link(secret: str) -> str:
-    return f"tg://proxy?server={PROXY_HOST}&port={PROXY_PORT}&secret=ee{secret}"
+    # Telemt runs in TLS-only mode; Telegram clients need the fake-TLS domain
+    # embedded in the secret (hex-encoded) to know which SNI to present.
+    # Without it the app gets stuck in "connecting..." and never opens TCP.
+    domain_hex = PROXY_DOMAIN.encode("ascii").hex() if PROXY_DOMAIN else ""
+    return f"tg://proxy?server={PROXY_HOST}&port={PROXY_PORT}&secret=ee{secret}{domain_hex}"
 
 # ── Stats helpers ─────────────────────────────────────────────────────────────
 
