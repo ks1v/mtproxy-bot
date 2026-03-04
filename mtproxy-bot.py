@@ -350,7 +350,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     user_totals = {}
     for username, data in stats.items():
-        conn_total, err_total, err_types = 0, 0, {}
+        conn_total, err_total, warn_total, err_types = 0, 0, 0, {}
         for bucket_key, bucket in data.get("buckets", {}).items():
             try:
                 bucket_dt = datetime.strptime(bucket_key, "%Y-%m-%dT%H").replace(tzinfo=timezone.utc)
@@ -358,12 +358,16 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 continue
             if (now - bucket_dt).total_seconds() / 3600 > hours_back:
                 continue
-            conn_total += bucket.get("conn", 0)
-            err_total  += bucket.get("errors", 0)
+            conn_total  += bucket.get("conn", 0)
+            err_total   += bucket.get("errors", 0)
+            warn_total  += bucket.get("warnings", 0)
             for etype, count in bucket.get("error_types", {}).items():
                 err_types[etype] = err_types.get(etype, 0) + count
-        if conn_total > 0 or err_total > 0:
-            user_totals[username] = {"conn": conn_total, "errors": err_total, "error_types": err_types}
+        if conn_total > 0 or err_total > 0 or warn_total > 0:
+            user_totals[username] = {
+                "conn": conn_total, "errors": err_total,
+                "warnings": warn_total, "error_types": err_types,
+            }
 
     if not user_totals:
         await update.message.reply_text(f"No data for the last {period_label}.")
@@ -375,22 +379,22 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sorted_known = sorted(user_totals.items(), key=lambda x: x[1]["conn"], reverse=True)
     active_known = len(sorted_known)
 
-    known_conn   = sum(v["conn"]   for v in user_totals.values())
-    known_errors = sum(v["errors"] for v in user_totals.values())
+    known_conn   = sum(v["conn"]     for v in user_totals.values())
+    known_errors = sum(v["errors"]   for v in user_totals.values())
+    known_warns  = sum(v["warnings"] for v in user_totals.values())
     unk_conn     = unknown_data["conn"]   if unknown_data else 0
-    unk_errors   = unknown_data["errors"] if unknown_data else 0
     total_conn   = known_conn + unk_conn
-    total_errors = known_errors + unk_errors
-    error_rate   = (total_errors / total_conn * 100) if total_conn else 0
 
     user_word = "user" if active_known == 1 else "users"
     lines = [f"📊 <b>Stats for {period_label}</b> · {active_known} active {user_word}\n"]
 
     def _fmt_row(username: str, data: dict) -> str:
-        conn   = data["conn"]
-        errors = data["errors"]
-        rate   = (errors / conn * 100) if conn else 0
-        share  = (conn / total_conn * 100) if total_conn else 0
+        conn     = data["conn"]
+        errors   = data["errors"]
+        warnings = data.get("warnings", 0)
+        err_rate  = (errors   / conn * 100) if conn else 0
+        warn_rate = (warnings / conn * 100) if conn else 0
+        share    = (conn / total_conn * 100) if total_conn else 0
         top_errors = sorted(data["error_types"].items(), key=lambda x: x[1], reverse=True)
         err_str = ""
         if top_errors:
@@ -400,7 +404,8 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             err_str = " | " + ", ".join(_shorten_error(e) for e, _ in show)
         return (
             f"👤 <b>{username}</b>\n"
-            f"   {conn:,} conn ({share:.0f}%) · {errors} errors ({rate:.1f}%){err_str}"
+            f"   {conn:,} conn ({share:.0f}%) · "
+            f"E {errors} ({err_rate:.1f}%), W {warnings} ({warn_rate:.1f}%){err_str}"
         )
 
     for username, data in sorted_known:
@@ -409,19 +414,15 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Separator + known subtotal + separator, then pre-auth "unknown" block
     if unknown_data is not None:
         sep = "─" * 22
-        known_err_rate = (known_errors / known_conn * 100) if known_conn else 0
+        known_err_rate  = (known_errors / known_conn * 100) if known_conn else 0
+        known_warn_rate = (known_warns  / known_conn * 100) if known_conn else 0
         lines.append(f"\n{sep}")
         lines.append(
             f"<b>Known:</b> {known_conn:,} conn · "
-            f"{known_errors} errors · {known_err_rate:.1f}%"
+            f"E {known_errors} ({known_err_rate:.1f}%), W {known_warns} ({known_warn_rate:.1f}%)"
         )
         lines.append(sep)
         lines.append(_fmt_row("unknown", unknown_data))
-
-    lines.append(
-        f"\n<b>Total:</b> {total_conn:,} connections · "
-        f"{total_errors} errors · {error_rate:.1f}% error rate"
-    )
 
     anomalies = []
     for username, data in sorted_known:

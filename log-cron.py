@@ -110,6 +110,7 @@ def process_lines(lines: list[str], stats: dict) -> tuple[dict, str | None]:
             stats[username]["buckets"][bucket] = {
                 "conn": 0,
                 "errors": 0,
+                "warnings": 0,
                 "error_types": {}
             }
 
@@ -118,7 +119,7 @@ def process_lines(lines: list[str], stats: dict) -> tuple[dict, str | None]:
         if "MTProto handshake successful" in line:
             b["conn"] += 1
 
-        elif "WARN" in line or "ERROR" in line:
+        elif "ERROR" in line:
             m_err = RE_ERROR.search(line)
             if m_err:
                 b["errors"] += 1
@@ -127,6 +128,11 @@ def process_lines(lines: list[str], stats: dict) -> tuple[dict, str | None]:
                 err_norm = re.sub(r"\d+\.\d+\.\d+\.\d+:\d+", "X", err_raw)
                 err_norm = re.sub(r"\d+\.\d+\.\d+\.\d+", "X", err_norm)
                 b["error_types"][err_norm] = b["error_types"].get(err_norm, 0) + 1
+
+        elif "WARN" in line:
+            m_err = RE_ERROR.search(line)
+            if m_err:
+                b["warnings"] = b.get("warnings", 0) + 1
 
     return stats, last_ts
 
