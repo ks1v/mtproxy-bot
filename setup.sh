@@ -37,6 +37,14 @@ else
     echo "      Done. Add users via the bot or edit telemt.toml directly."
 fi
 
+# 4b. Add a default user if telemt.toml has no users yet
+if ! grep -qE '^\s*[a-zA-Z0-9_]+ *= *"[0-9a-f]+"' "$DEPLOY_DIR/telemt.toml"; then
+    echo "[4b] No users found — generating default user..."
+    DEFAULT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(16))")
+    echo "default = \"$DEFAULT_SECRET\"" >> "$DEPLOY_DIR/telemt.toml"
+    echo "      Added user: default  secret: $DEFAULT_SECRET"
+fi
+
 # 5. Create data directory and fix telemt.toml permissions
 echo "[5/6] Creating data directory and setting permissions..."
 mkdir -p "$DEPLOY_DIR/data"
@@ -59,5 +67,5 @@ echo "Check logs:     docker compose -f $DEPLOY_DIR/docker-compose.yml logs -f"
 echo "Check bot:      send /start to your bot on Telegram"
 echo "Add users:      send @username to the bot"
 echo ""
-echo "NOTE: telemt.toml has no users yet — add them via the bot before"
-echo "      sharing any proxy links."
+echo "NOTE: A 'default' user was added to telemt.toml if none existed."
+echo "      Send @username to the bot to create more users."
