@@ -34,6 +34,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 log = logging.getLogger(__name__)
+# httpx logs every Telegram API call URL, which includes the bot token — suppress it
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Forwarding instruction stays in Russian — this is what gets sent to end users
 INSTRUCTION = "Нажать на ссылку → Добавить → работает само 🚀"
