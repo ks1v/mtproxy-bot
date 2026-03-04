@@ -369,19 +369,28 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"No data for the last {period_label}.")
         return
 
-    sorted_users  = sorted(user_totals.items(), key=lambda x: x[1]["conn"], reverse=True)
-    total_conn    = sum(v["conn"]   for v in user_totals.values())
-    total_errors  = sum(v["errors"] for v in user_totals.values())
-    error_rate    = (total_errors / total_conn * 100) if total_conn else 0
+    # "unknown" = errors that fired before telemt could identify the key
+    # (TLS/transport layer failures: Telegram health-probes, scanners, early drops)
+    unknown_data = user_totals.pop("unknown", None)
+    sorted_known = sorted(user_totals.items(), key=lambda x: x[1]["conn"], reverse=True)
+    active_known = len(sorted_known)
 
-    lines = [f"📊 <b>Stats for {period_label}</b>\n"]
+    known_conn   = sum(v["conn"]   for v in user_totals.values())
+    known_errors = sum(v["errors"] for v in user_totals.values())
+    unk_conn     = unknown_data["conn"]   if unknown_data else 0
+    unk_errors   = unknown_data["errors"] if unknown_data else 0
+    total_conn   = known_conn + unk_conn
+    total_errors = known_errors + unk_errors
+    error_rate   = (total_errors / total_conn * 100) if total_conn else 0
 
-    for username, data in sorted_users:
+    user_word = "user" if active_known == 1 else "users"
+    lines = [f"📊 <b>Stats for {period_label}</b> · {active_known} active {user_word}\n"]
+
+    def _fmt_row(username: str, data: dict) -> str:
         conn   = data["conn"]
         errors = data["errors"]
         rate   = (errors / conn * 100) if conn else 0
         share  = (conn / total_conn * 100) if total_conn else 0
-
         top_errors = sorted(data["error_types"].items(), key=lambda x: x[1], reverse=True)
         err_str = ""
         if top_errors:
@@ -389,11 +398,25 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if len(top_errors) > 1 and top_errors[1][1] >= top_errors[0][1] * 0.5:
                 show.append(top_errors[1])
             err_str = " | " + ", ".join(_shorten_error(e) for e, _ in show)
-
-        lines.append(
+        return (
             f"👤 <b>{username}</b>\n"
             f"   {conn:,} conn ({share:.0f}%) · {errors} errors ({rate:.1f}%){err_str}"
         )
+
+    for username, data in sorted_known:
+        lines.append(_fmt_row(username, data))
+
+    # Separator + known subtotal + separator, then pre-auth "unknown" block
+    if unknown_data is not None:
+        sep = "─" * 22
+        known_err_rate = (known_errors / known_conn * 100) if known_conn else 0
+        lines.append(f"\n{sep}")
+        lines.append(
+            f"<b>Known:</b> {known_conn:,} conn · "
+            f"{known_errors} errors · {known_err_rate:.1f}%"
+        )
+        lines.append(sep)
+        lines.append(_fmt_row("unknown", unknown_data))
 
     lines.append(
         f"\n<b>Total:</b> {total_conn:,} connections · "
@@ -401,11 +424,11 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     anomalies = []
-    for username, data in sorted_users:
-        conn  = data["conn"]
+    for username, data in sorted_known:
+        conn   = data["conn"]
         errors = data["errors"]
-        share = (conn / total_conn * 100) if total_conn else 0
-        rate  = (errors / conn * 100) if conn else 0
+        share  = (conn / total_conn * 100) if total_conn else 0
+        rate   = (errors / conn * 100) if conn else 0
         if share > 40 and conn >= 100:
             anomalies.append(f"⚠️ <b>{username}</b> — {share:.0f}% of all traffic (possible key leak)")
         if rate > 15:
