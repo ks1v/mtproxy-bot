@@ -225,9 +225,7 @@ async def send_list_page(chat_id, page: int, ctx, message_id=None):
     keyboard = []
     for username in usernames[start:end]:
         keyboard.append([
-            InlineKeyboardButton("📤 Send",   callback_data=f"send|{username}"),
-            InlineKeyboardButton("🔄 Reset",  callback_data=f"reset|{username}"),
-            InlineKeyboardButton("🗑 Delete", callback_data=f"delete|{username}"),
+            InlineKeyboardButton(f"👤 {username}", callback_data=f"user|{username}|{page}"),
         ])
 
     nav = []
@@ -252,6 +250,29 @@ async def send_list_page(chat_id, page: int, ctx, message_id=None):
         )
 
 
+async def send_user_detail(chat_id, username: str, page: int, ctx, message_id=None):
+    """Show Send / Reset / Delete buttons for a single user, with a Back button."""
+    text = f"👤 <b>{username}</b>"
+    keyboard = [
+        [
+            InlineKeyboardButton("📤 Send",   callback_data=f"send|{username}"),
+            InlineKeyboardButton("🔄 Reset",  callback_data=f"reset|{username}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"delete|{username}"),
+        ],
+        [InlineKeyboardButton("◀️ Back", callback_data=f"back|{page}")],
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    if message_id:
+        await ctx.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=text, parse_mode="HTML", reply_markup=markup
+        )
+    else:
+        await ctx.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup
+        )
+
+
 @owner_only
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -261,6 +282,16 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     message_id = query.message.message_id
 
     if data.startswith("page|"):
+        await send_list_page(chat_id, int(data.split("|")[1]), ctx, message_id=message_id)
+
+    elif data.startswith("user|"):
+        # user|{username}|{page}
+        parts = data.split("|")
+        username = parts[1]
+        page = int(parts[2]) if len(parts) > 2 else 0
+        await send_user_detail(chat_id, username, page, ctx, message_id=message_id)
+
+    elif data.startswith("back|"):
         await send_list_page(chat_id, int(data.split("|")[1]), ctx, message_id=message_id)
 
     elif data.startswith("send|"):
@@ -375,7 +406,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         errors = data["errors"]
         share = (conn / total_conn * 100) if total_conn else 0
         rate  = (errors / conn * 100) if conn else 0
-        if share > 40:
+        if share > 40 and conn >= 100:
             anomalies.append(f"⚠️ <b>{username}</b> — {share:.0f}% of all traffic (possible key leak)")
         if rate > 15:
             anomalies.append(f"⚠️ <b>{username}</b> — high error rate {rate:.1f}%")
