@@ -37,12 +37,14 @@ else
     echo "      Done. Add users via the bot or edit telemt.toml directly."
 fi
 
-# 5. Create data directory with correct ownership
-echo "[5/6] Creating data directory..."
+# 5. Create data directory and fix telemt.toml permissions
+echo "[5/6] Creating data directory and setting permissions..."
 mkdir -p "$DEPLOY_DIR/data"
-# botuser inside container maps to nobody (system user) — 
+# botuser inside container maps to nobody (system user) —
 # make it world-writable so botuser can write stats
 chmod 777 "$DEPLOY_DIR/data"
+# telemt.toml must be writable by botuser inside the container
+chmod 666 "$DEPLOY_DIR/telemt.toml"
 
 # 6. Stop old standalone telemt container, start everything via compose
 echo "[6/6] Restarting containers..."
