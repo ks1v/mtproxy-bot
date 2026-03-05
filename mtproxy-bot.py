@@ -351,6 +351,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_totals = {}
     for username, data in stats.items():
         conn_total, err_total, warn_total, err_types = 0, 0, 0, {}
+        peer_ips: dict[str, int] = {}
         for bucket_key, bucket in data.get("buckets", {}).items():
             try:
                 bucket_dt = datetime.strptime(bucket_key, "%Y-%m-%dT%H").replace(tzinfo=timezone.utc)
@@ -363,10 +364,13 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             warn_total  += bucket.get("warnings", 0)
             for etype, count in bucket.get("error_types", {}).items():
                 err_types[etype] = err_types.get(etype, 0) + count
+            for ip, cnt in bucket.get("peer_ips", {}).items():
+                peer_ips[ip] = peer_ips.get(ip, 0) + cnt
         if conn_total > 0 or err_total > 0 or warn_total > 0:
             user_totals[username] = {
                 "conn": conn_total, "errors": err_total,
                 "warnings": warn_total, "error_types": err_types,
+                "peer_ips": peer_ips,
             }
 
     if not user_totals:
@@ -395,6 +399,8 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         err_rate  = (errors   / conn * 100) if conn else 0
         warn_rate = (warnings / conn * 100) if conn else 0
         share    = (conn / total_conn * 100) if total_conn else 0
+        unique_ips = len(data.get("peer_ips", {}))
+
         top_errors = sorted(data["error_types"].items(), key=lambda x: x[1], reverse=True)
         err_str = ""
         if top_errors:
@@ -402,10 +408,19 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if len(top_errors) > 1 and top_errors[1][1] >= top_errors[0][1] * 0.5:
                 show.append(top_errors[1])
             err_str = " | " + ", ".join(_shorten_error(e) for e, _ in show)
+
+        ew_parts = []
+        if errors > 0:
+            ew_parts.append(f"E {errors} ({err_rate:.1f}%)")
+        if warnings > 0:
+            ew_parts.append(f"W {warnings} ({warn_rate:.1f}%)")
+        ew_str = " · " + ", ".join(ew_parts) if ew_parts else ""
+
+        ip_str = f" · {unique_ips} IPs" if unique_ips > 0 else ""
+
         return (
             f"👤 <b>{username}</b>\n"
-            f"   {conn:,} conn ({share:.0f}%) · "
-            f"E {errors} ({err_rate:.1f}%), W {warnings} ({warn_rate:.1f}%){err_str}"
+            f"   {conn:,} conn ({share:.0f}%){ew_str}{ip_str}{err_str}"
         )
 
     for username, data in sorted_known:
@@ -416,13 +431,21 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sep = "─" * 22
         known_err_rate  = (known_errors / known_conn * 100) if known_conn else 0
         known_warn_rate = (known_warns  / known_conn * 100) if known_conn else 0
+        known_ew = []
+        if known_errors > 0:
+            known_ew.append(f"E {known_errors} ({known_err_rate:.1f}%)")
+        if known_warns > 0:
+            known_ew.append(f"W {known_warns} ({known_warn_rate:.1f}%)")
+        known_ew_str = " · " + ", ".join(known_ew) if known_ew else ""
         lines.append(f"\n{sep}")
-        lines.append(
-            f"<b>Known:</b> {known_conn:,} conn · "
-            f"E {known_errors} ({known_err_rate:.1f}%), W {known_warns} ({known_warn_rate:.1f}%)"
-        )
+        lines.append(f"<b>Known:</b> {known_conn:,} conn{known_ew_str}")
         lines.append(sep)
         lines.append(_fmt_row("unknown", unknown_data))
+        # Show top source IPs for unknown — useful for spotting scanners / probes
+        top_ips = sorted(unknown_data.get("peer_ips", {}).items(), key=lambda x: x[1], reverse=True)[:5]
+        if top_ips:
+            ip_parts = ", ".join(f"{ip} ({cnt})" for ip, cnt in top_ips)
+            lines.append(f"   <i>Top IPs: {ip_parts}</i>")
 
     anomalies = []
     for username, data in sorted_known:
