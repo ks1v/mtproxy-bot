@@ -17,7 +17,7 @@ CONTAINER   = "telemt"
 
 ANSI        = re.compile(r"\x1b\[[0-9;]*m")
 RE_TS       = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
-RE_PEER     = re.compile(r"peer=(\d+\.\d+\.\d+\.\d+)")
+RE_PEER     = re.compile(r"peer=([\d.]+(?::\d+)?)")
 RE_USER     = re.compile(r"user=(\S+)")
 RE_ERROR    = re.compile(r"error=(.+)$")
 
@@ -111,10 +111,19 @@ def process_lines(lines: list[str], stats: dict) -> tuple[dict, str | None]:
                 "conn": 0,
                 "errors": 0,
                 "warnings": 0,
-                "error_types": {}
+                "error_types": {},
+                "peer_ips": {},
             }
 
         b = stats[username]["buckets"][bucket]
+
+        # Track unique peer IPs (and port if present, e.g. "1.2.3.4:54321")
+        m_peer = RE_PEER.search(line)
+        if m_peer:
+            peer = m_peer.group(1)
+            if "peer_ips" not in b:
+                b["peer_ips"] = {}
+            b["peer_ips"][peer] = b["peer_ips"].get(peer, 0) + 1
 
         if "MTProto handshake successful" in line:
             b["conn"] += 1
