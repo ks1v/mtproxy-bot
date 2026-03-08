@@ -323,32 +323,37 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"Deleted: {username}", show_alert=True)
         await send_list_page(chat_id, 0, ctx, message_id=message_id)
 
+    elif data.startswith("stats|"):
+        period = data.split("|")[1]
+        if period not in ("day", "week", "month"):
+            return
+        stats = load_stats()
+        if not stats:
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text="No stats yet — wait up to 5 minutes for the first cron run.",
+            )
+            return
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=_build_stats_text(period, stats),
+            parse_mode="HTML",
+        )
+
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
-@owner_only
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/stats day|week|month"""
-    period = ctx.args[0].lower() if ctx.args else "day"
-    if period not in ("day", "week", "month"):
-        await update.message.reply_text("Usage: /stats day|week|month")
-        return
-
-    stats = load_stats()
-    if not stats:
-        await update.message.reply_text(
-            "No stats yet — wait up to 5 minutes for the first cron run."
-        )
-        return
-
+def _build_stats_text(period: str, stats: dict) -> str:
+    """Aggregate stats.json for the given period and return HTML-formatted text."""
     now = datetime.now(timezone.utc)
     hours_back, period_label = {
-        "day":   (24,      "24 hours"),
-        "week":  (24*7,    "7 days"),
-        "month": (24*30,   "30 days"),
+        "day":   (24,    "24 hours"),
+        "week":  (24*7,  "7 days"),
+        "month": (24*30, "30 days"),
     }[period]
 
-    user_totals = {}
+    # Aggregate per-user totals — peer_ips grouped by username + time window
+    user_totals: dict[str, dict] = {}
     for username, data in stats.items():
         conn_total, err_total, warn_total, err_types = 0, 0, 0, {}
         peer_ips: dict[str, int] = {}
@@ -359,9 +364,9 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 continue
             if (now - bucket_dt).total_seconds() / 3600 > hours_back:
                 continue
-            conn_total  += bucket.get("conn", 0)
-            err_total   += bucket.get("errors", 0)
-            warn_total  += bucket.get("warnings", 0)
+            conn_total += bucket.get("conn", 0)
+            err_total  += bucket.get("errors", 0)
+            warn_total += bucket.get("warnings", 0)
             for etype, count in bucket.get("error_types", {}).items():
                 err_types[etype] = err_types.get(etype, 0) + count
             for ip, cnt in bucket.get("peer_ips", {}).items():
@@ -374,11 +379,9 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             }
 
     if not user_totals:
-        await update.message.reply_text(f"No data for the last {period_label}.")
-        return
+        return f"No data for the last {period_label}."
 
-    # "unknown" = errors that fired before telemt could identify the key
-    # (TLS/transport layer failures: Telegram health-probes, scanners, early drops)
+    # "unknown" = pre-auth failures (TLS/transport layer, scanners, health probes)
     unknown_data = user_totals.pop("unknown", None)
     sorted_known = sorted(user_totals.items(), key=lambda x: x[1]["conn"], reverse=True)
     active_known = len(sorted_known)
@@ -386,22 +389,22 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     known_conn   = sum(v["conn"]     for v in user_totals.values())
     known_errors = sum(v["errors"]   for v in user_totals.values())
     known_warns  = sum(v["warnings"] for v in user_totals.values())
-    unk_conn     = unknown_data["conn"]   if unknown_data else 0
+    unk_conn     = unknown_data["conn"] if unknown_data else 0
     total_conn   = known_conn + unk_conn
 
     user_word = "user" if active_known == 1 else "users"
     lines = [f"📊 <b>Stats for {period_label}</b> · {active_known} active {user_word}\n"]
 
-    def _fmt_row(username: str, data: dict) -> str:
-        conn     = data["conn"]
-        errors   = data["errors"]
-        warnings = data.get("warnings", 0)
-        err_rate  = (errors   / conn * 100) if conn else 0
-        warn_rate = (warnings / conn * 100) if conn else 0
-        share    = (conn / total_conn * 100) if total_conn else 0
-        unique_ips = len(data.get("peer_ips", {}))
+    def _fmt_row(uname: str, d: dict) -> str:
+        conn       = d["conn"]
+        errors     = d["errors"]
+        warnings   = d.get("warnings", 0)
+        err_rate   = (errors   / conn * 100) if conn else 0
+        warn_rate  = (warnings / conn * 100) if conn else 0
+        share      = (conn / total_conn * 100) if total_conn else 0
+        unique_ips = len(d.get("peer_ips", {}))
 
-        top_errors = sorted(data["error_types"].items(), key=lambda x: x[1], reverse=True)
+        top_errors = sorted(d["error_types"].items(), key=lambda x: x[1], reverse=True)
         err_str = ""
         if top_errors:
             show = [top_errors[0]]
@@ -415,34 +418,34 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if warnings > 0:
             ew_parts.append(f"W {warnings} ({warn_rate:.1f}%)")
         ew_str = " · " + ", ".join(ew_parts) if ew_parts else ""
-
         ip_str = f" · {unique_ips} IPs" if unique_ips > 0 else ""
 
         return (
-            f"👤 <b>{username}</b>\n"
+            f"👤 <b>{uname}</b>\n"
             f"   {conn:,} conn ({share:.0f}%){ew_str}{ip_str}{err_str}"
         )
 
     for username, data in sorted_known:
         lines.append(_fmt_row(username, data))
 
-    # Separator + known subtotal + separator, then pre-auth "unknown" block
+    # Separator + known subtotal + unknown pre-auth block
     if unknown_data is not None:
         sep = "─" * 22
-        known_err_rate  = (known_errors / known_conn * 100) if known_conn else 0
-        known_warn_rate = (known_warns  / known_conn * 100) if known_conn else 0
         known_ew = []
         if known_errors > 0:
-            known_ew.append(f"E {known_errors} ({known_err_rate:.1f}%)")
+            known_ew.append(f"E {known_errors} ({known_errors / known_conn * 100:.1f}%)" if known_conn else f"E {known_errors}")
         if known_warns > 0:
-            known_ew.append(f"W {known_warns} ({known_warn_rate:.1f}%)")
+            known_ew.append(f"W {known_warns} ({known_warns / known_conn * 100:.1f}%)" if known_conn else f"W {known_warns}")
         known_ew_str = " · " + ", ".join(known_ew) if known_ew else ""
         lines.append(f"\n{sep}")
         lines.append(f"<b>Known:</b> {known_conn:,} conn{known_ew_str}")
         lines.append(sep)
         lines.append(_fmt_row("unknown", unknown_data))
-        # Show top source IPs for unknown — useful for spotting scanners / probes
-        top_ips = sorted(unknown_data.get("peer_ips", {}).items(), key=lambda x: x[1], reverse=True)[:5]
+        # Top source IPs for unknown — scanners/probes; skip one-off single hits
+        top_ips = sorted(
+            [(ip, cnt) for ip, cnt in unknown_data.get("peer_ips", {}).items() if cnt > 1],
+            key=lambda x: x[1], reverse=True
+        )[:5]
         if top_ips:
             ip_parts = ", ".join(f"{ip} ({cnt})" for ip, cnt in top_ips)
             lines.append(f"   <i>Top IPs: {ip_parts}</i>")
@@ -462,7 +465,23 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append("\n<b>Anomalies:</b>")
         lines.extend(anomalies)
 
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    return "\n".join(lines)
+
+
+@owner_only
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/stats day|week|month"""
+    period = ctx.args[0].lower() if ctx.args else "day"
+    if period not in ("day", "week", "month"):
+        await update.message.reply_text("Usage: /stats day|week|month")
+        return
+    stats = load_stats()
+    if not stats:
+        await update.message.reply_text(
+            "No stats yet — wait up to 5 minutes for the first cron run."
+        )
+        return
+    await update.message.reply_text(_build_stats_text(period, stats), parse_mode="HTML")
 
 
 def _shorten_error(error: str) -> str:
@@ -497,6 +516,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_count = len(get_users(doc))
     proxy_ok, proxy_status = check_proxy()
 
+    keyboard = [[
+        InlineKeyboardButton("📊 Day",   callback_data="stats|day"),
+        InlineKeyboardButton("📅 Week",  callback_data="stats|week"),
+        InlineKeyboardButton("🗓 Month", callback_data="stats|month"),
+    ]]
     await update.message.reply_text(
         "🛰 <b>mtproxy-bot</b>\n\n"
         f"{proxy_status}\n"
@@ -508,7 +532,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/revoke @username — delete key\n"
         "/stats day|week|month — usage report\n"
         "/batch @u1 @u2 ... — bulk add",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
