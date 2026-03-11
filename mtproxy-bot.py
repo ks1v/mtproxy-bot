@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import tomlkit
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, MessageHandler, CommandHandler,
     CallbackQueryHandler, ContextTypes, filters
@@ -288,53 +288,36 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
-@owner_only
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/stats day|week|month"""
-    period = ctx.args[0].lower() if ctx.args else "day"
-    if period not in ("day", "week", "month"):
-        await update.message.reply_text("Usage: /stats day|week|month")
-        return
-
-    stats = load_stats()
-    if not stats:
-        await update.message.reply_text(
-            "No stats yet — wait up to 5 minutes for the first cron run."
-        )
-        return
-
+def _aggregate_stats(stats: dict, hours_back: int | None, skip_unknown: bool = True) -> dict:
+    """Aggregate stats over the given time window. hours_back=None means all time."""
     now = datetime.now(timezone.utc)
-    hours_back, period_label = {
-        "day":   (24,      "24 hours"),
-        "week":  (24*7,    "7 days"),
-        "month": (24*30,   "30 days"),
-    }[period]
-
     user_totals = {}
     for username, data in stats.items():
+        if skip_unknown and username == "unknown":
+            continue
         conn_total, err_total, err_types = 0, 0, {}
         for bucket_key, bucket in data.get("buckets", {}).items():
-            try:
-                bucket_dt = datetime.strptime(bucket_key, "%Y-%m-%dT%H").replace(tzinfo=timezone.utc)
-            except ValueError:
-                continue
-            if (now - bucket_dt).total_seconds() / 3600 > hours_back:
-                continue
+            if hours_back is not None:
+                try:
+                    bucket_dt = datetime.strptime(bucket_key, "%Y-%m-%dT%H").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if (now - bucket_dt).total_seconds() / 3600 > hours_back:
+                    continue
             conn_total += bucket.get("conn", 0)
             err_total  += bucket.get("errors", 0)
             for etype, count in bucket.get("error_types", {}).items():
                 err_types[etype] = err_types.get(etype, 0) + count
         if conn_total > 0 or err_total > 0:
             user_totals[username] = {"conn": conn_total, "errors": err_total, "error_types": err_types}
+    return user_totals
 
-    if not user_totals:
-        await update.message.reply_text(f"No data for the last {period_label}.")
-        return
 
-    sorted_users  = sorted(user_totals.items(), key=lambda x: x[1]["conn"], reverse=True)
-    total_conn    = sum(v["conn"]   for v in user_totals.values())
-    total_errors  = sum(v["errors"] for v in user_totals.values())
-    error_rate    = (total_errors / total_conn * 100) if total_conn else 0
+def _format_stats(user_totals: dict, period_label: str) -> str:
+    sorted_users = sorted(user_totals.items(), key=lambda x: x[1]["conn"], reverse=True)
+    total_conn   = sum(v["conn"]   for v in user_totals.values())
+    total_errors = sum(v["errors"] for v in user_totals.values())
+    error_rate   = (total_errors / total_conn * 100) if total_conn else 0
 
     lines = [f"📊 <b>Stats for {period_label}</b>\n"]
 
@@ -364,10 +347,10 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     anomalies = []
     for username, data in sorted_users:
-        conn  = data["conn"]
+        conn   = data["conn"]
         errors = data["errors"]
-        share = (conn / total_conn * 100) if total_conn else 0
-        rate  = (errors / conn * 100) if conn else 0
+        share  = (conn / total_conn * 100) if total_conn else 0
+        rate   = (errors / conn * 100) if conn else 0
         if share > 40:
             anomalies.append(f"⚠️ <b>{username}</b> — {share:.0f}% of all traffic (possible key leak)")
         if rate > 15:
@@ -377,7 +360,52 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append("\n<b>Anomalies:</b>")
         lines.extend(anomalies)
 
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    return "\n".join(lines)
+
+
+@owner_only
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/stats week|month|all"""
+    period = ctx.args[0].lower() if ctx.args else "week"
+    if period not in ("week", "month", "all"):
+        await update.message.reply_text("Usage: /stats week|month|all")
+        return
+
+    stats = load_stats()
+    if not stats:
+        await update.message.reply_text(
+            "No stats yet — wait up to 5 minutes for the first cron run."
+        )
+        return
+
+    hours_back, period_label = {
+        "week":  (24*7,  "7 days"),
+        "month": (24*30, "30 days"),
+        "all":   (None,  "all time"),
+    }[period]
+
+    user_totals = _aggregate_stats(stats, hours_back, skip_unknown=True)
+    if not user_totals:
+        await update.message.reply_text(f"No data for {period_label}.")
+        return
+
+    await update.message.reply_text(_format_stats(user_totals, period_label), parse_mode="HTML")
+
+
+@owner_only
+async def cmd_unknowns(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/unknowns — all-time stats for the 'unknown' user bucket"""
+    stats = load_stats()
+    if not stats or "unknown" not in stats:
+        await update.message.reply_text("No data for unknown connections.")
+        return
+
+    user_totals = _aggregate_stats({"unknown": stats["unknown"]}, hours_back=None, skip_unknown=False)
+    if not user_totals:
+        await update.message.reply_text("No unknown connections recorded.")
+        return
+
+    await update.message.reply_text(_format_stats(user_totals, "all time (unknowns)"), parse_mode="HTML")
 
 
 def _shorten_error(error: str) -> str:
@@ -406,6 +434,14 @@ def check_proxy() -> tuple[bool, str]:
         return False, f"❌ Proxy unreachable — {e}"
 
 
+_REPLY_KEYBOARD = ReplyKeyboardMarkup(
+    [["/revoke", "/batch"],
+     ["/list",   "/unknowns"],
+     ["/stats week", "/stats month", "/stats all"]],
+    resize_keyboard=True,
+)
+
+
 @owner_only
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     doc = load_toml()
@@ -416,26 +452,22 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🛰 <b>mtproxy-bot</b>\n\n"
         f"{proxy_status}\n"
         f"👥 Users: {user_count}\n\n"
-        "<b>Usage:</b>\n"
-        "Send <code>@username</code> — get or create a key\n\n"
-        "<b>Commands:</b>\n"
-        "/list — all users (paginated)\n"
-        "/revoke @username — delete key\n"
-        "/stats day|week|month — usage report\n"
-        "/batch @u1 @u2 ... — bulk add",
-        parse_mode="HTML"
+        "Send <code>@username</code> — get or create a key",
+        parse_mode="HTML",
+        reply_markup=_REPLY_KEYBOARD,
     )
 
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("user",   cmd_user))
-    app.add_handler(CommandHandler("batch",  cmd_batch))
-    app.add_handler(CommandHandler("revoke", cmd_revoke))
-    app.add_handler(CommandHandler("list",   cmd_list))
-    app.add_handler(CommandHandler("stats",  cmd_stats))
+    app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("user",     cmd_user))
+    app.add_handler(CommandHandler("batch",    cmd_batch))
+    app.add_handler(CommandHandler("revoke",   cmd_revoke))
+    app.add_handler(CommandHandler("list",     cmd_list))
+    app.add_handler(CommandHandler("stats",    cmd_stats))
+    app.add_handler(CommandHandler("unknowns", cmd_unknowns))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
