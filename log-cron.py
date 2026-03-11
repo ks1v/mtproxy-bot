@@ -111,12 +111,22 @@ def process_lines(lines: list[str], stats: dict) -> tuple[dict, str | None]:
                 "conn": 0,
                 "peers": [],
                 "errors": 0,
-                "error_types": {}
+                "warnings": 0,
+                "error_types": {},
+                "peer_ips": {},
             }
 
         b = stats[username]["buckets"][bucket]
         if "peers" not in b:
             b["peers"] = []   # backward compat: existing buckets lack this field
+
+        # Track unique peer IPs (and port if present, e.g. "1.2.3.4:54321")
+        m_peer = RE_PEER.search(line)
+        if m_peer:
+            peer = m_peer.group(1)
+            if "peer_ips" not in b:
+                b["peer_ips"] = {}
+            b["peer_ips"][peer] = b["peer_ips"].get(peer, 0) + 1
 
         if "MTProto handshake successful" in line:
             m_peer = RE_PEER.search(line)
@@ -124,7 +134,7 @@ def process_lines(lines: list[str], stats: dict) -> tuple[dict, str | None]:
                 b["peers"].append(m_peer.group(1))
             b["conn"] = len({p.split(":")[0] for p in b["peers"]})
 
-        elif "WARN" in line or "ERROR" in line:
+        elif "ERROR" in line:
             m_err = RE_ERROR.search(line)
             if m_err:
                 b["errors"] += 1
@@ -133,6 +143,11 @@ def process_lines(lines: list[str], stats: dict) -> tuple[dict, str | None]:
                 err_norm = re.sub(r"\d+\.\d+\.\d+\.\d+:\d+", "X", err_raw)
                 err_norm = re.sub(r"\d+\.\d+\.\d+\.\d+", "X", err_norm)
                 b["error_types"][err_norm] = b["error_types"].get(err_norm, 0) + 1
+
+        elif "WARN" in line:
+            m_err = RE_ERROR.search(line)
+            if m_err:
+                b["warnings"] = b.get("warnings", 0) + 1
 
     return stats, last_ts
 

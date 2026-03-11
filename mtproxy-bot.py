@@ -22,10 +22,11 @@ from telegram.ext import (
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN   = os.environ["BOT_TOKEN"]
 OWNER_ID    = int(os.environ["OWNER_ID"])
-PROXY_HOST  = os.environ.get("PROXY_HOST", "89.125.209.103")
-PROXY_PORT  = os.environ.get("PROXY_PORT", "443")
-TOML_PATH   = Path(os.environ.get("TOML_PATH", "/data/telemt.toml"))
-STATS_PATH  = Path(os.environ.get("STATS_PATH", "/data/stats.json"))
+PROXY_HOST   = os.environ.get("PROXY_HOST", "89.125.209.103")
+PROXY_PORT   = os.environ.get("PROXY_PORT", "443")
+PROXY_DOMAIN = os.environ.get("PROXY_DOMAIN", "")   # TLS fake-domain, e.g. "1c.ru"
+TOML_PATH    = Path(os.environ.get("TOML_PATH", "/data/telemt.toml"))
+STATS_PATH   = Path(os.environ.get("STATS_PATH", "/data/stats.json"))
 
 PAGE_SIZE = 10
 
@@ -34,6 +35,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 log = logging.getLogger(__name__)
+# httpx logs every Telegram API call URL, which includes the bot token — suppress it
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Forwarding instruction stays in Russian — this is what gets sent to end users
 INSTRUCTION = "Нажать на ссылку → Добавить → работает само 🚀"
@@ -68,7 +71,11 @@ def gen_secret() -> str:
     return secrets.token_hex(16)
 
 def proxy_link(secret: str) -> str:
-    return f"tg://proxy?server={PROXY_HOST}&port={PROXY_PORT}&secret=ee{secret}"
+    # Telemt runs in TLS-only mode; Telegram clients need the fake-TLS domain
+    # embedded in the secret (hex-encoded) to know which SNI to present.
+    # Without it the app gets stuck in "connecting..." and never opens TCP.
+    domain_hex = PROXY_DOMAIN.encode("ascii").hex() if PROXY_DOMAIN else ""
+    return f"tg://proxy?server={PROXY_HOST}&port={PROXY_PORT}&secret=ee{secret}{domain_hex}"
 
 # ── Stats helpers ─────────────────────────────────────────────────────────────
 
@@ -218,9 +225,7 @@ async def send_list_page(chat_id, page: int, ctx, message_id=None):
     keyboard = []
     for username in usernames[start:end]:
         keyboard.append([
-            InlineKeyboardButton("📤 Send",   callback_data=f"send|{username}"),
-            InlineKeyboardButton("🔄 Reset",  callback_data=f"reset|{username}"),
-            InlineKeyboardButton("🗑 Delete", callback_data=f"delete|{username}"),
+            InlineKeyboardButton(f"👤 {username}", callback_data=f"user|{username}|{page}"),
         ])
 
     nav = []
@@ -245,6 +250,29 @@ async def send_list_page(chat_id, page: int, ctx, message_id=None):
         )
 
 
+async def send_user_detail(chat_id, username: str, page: int, ctx, message_id=None):
+    """Show Send / Reset / Delete buttons for a single user, with a Back button."""
+    text = f"👤 <b>{username}</b>"
+    keyboard = [
+        [
+            InlineKeyboardButton("📤 Send",   callback_data=f"send|{username}"),
+            InlineKeyboardButton("🔄 Reset",  callback_data=f"reset|{username}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"delete|{username}"),
+        ],
+        [InlineKeyboardButton("◀️ Back", callback_data=f"back|{page}")],
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    if message_id:
+        await ctx.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=text, parse_mode="HTML", reply_markup=markup
+        )
+    else:
+        await ctx.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup
+        )
+
+
 @owner_only
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -254,6 +282,16 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     message_id = query.message.message_id
 
     if data.startswith("page|"):
+        await send_list_page(chat_id, int(data.split("|")[1]), ctx, message_id=message_id)
+
+    elif data.startswith("user|"):
+        # user|{username}|{page}
+        parts = data.split("|")
+        username = parts[1]
+        page = int(parts[2]) if len(parts) > 2 else 0
+        await send_user_detail(chat_id, username, page, ctx, message_id=message_id)
+
+    elif data.startswith("back|"):
         await send_list_page(chat_id, int(data.split("|")[1]), ctx, message_id=message_id)
 
     elif data.startswith("send|"):
@@ -285,8 +323,23 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"Deleted: {username}", show_alert=True)
         await send_list_page(chat_id, 0, ctx, message_id=message_id)
 
+    elif data.startswith("stats|"):
+        period = data.split("|")[1]
+        if period not in ("day", "week", "month"):
+            return
+        stats = load_stats()
+        if not stats:
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text="No stats yet — wait up to 5 minutes for the first cron run.",
+            )
+            return
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=_build_stats_text(period, stats),
+            parse_mode="HTML",
+        )
 
-# ── Stats ─────────────────────────────────────────────────────────────────────
 
 def _aggregate_stats(stats: dict, hours_back: int | None, skip_unknown: bool = True) -> dict:
     """Aggregate stats over the given time window. hours_back=None means all time."""
@@ -306,6 +359,7 @@ def _aggregate_stats(stats: dict, hours_back: int | None, skip_unknown: bool = T
                     continue
             conn_total += bucket.get("conn", 0)
             err_total  += bucket.get("errors", 0)
+            warn_total += bucket.get("warnings", 0)
             for etype, count in bucket.get("error_types", {}).items():
                 err_types[etype] = err_types.get(etype, 0) + count
         if conn_total > 0 or err_total > 0:
@@ -335,15 +389,43 @@ def _format_stats(user_totals: dict, period_label: str) -> str:
                 show.append(top_errors[1])
             err_str = " | " + ", ".join(_shorten_error(e) for e, _ in show)
 
-        lines.append(
-            f"👤 <b>{username}</b>\n"
-            f"   {conn:,} conn ({share:.0f}%) · {errors} errors ({rate:.1f}%){err_str}"
+        ew_parts = []
+        if errors > 0:
+            ew_parts.append(f"E {errors} ({err_rate:.1f}%)")
+        if warnings > 0:
+            ew_parts.append(f"W {warnings} ({warn_rate:.1f}%)")
+        ew_str = " · " + ", ".join(ew_parts) if ew_parts else ""
+        ip_str = f" · {unique_ips} IPs" if unique_ips > 0 else ""
+
+        return (
+            f"👤 <b>{uname}</b>\n"
+            f"   {conn:,} conn ({share:.0f}%){ew_str}{ip_str}{err_str}"
         )
 
-    lines.append(
-        f"\n<b>Total:</b> {total_conn:,} connections · "
-        f"{total_errors} errors · {error_rate:.1f}% error rate"
-    )
+    for username, data in sorted_known:
+        lines.append(_fmt_row(username, data))
+
+    # Separator + known subtotal + unknown pre-auth block
+    if unknown_data is not None:
+        sep = "─" * 22
+        known_ew = []
+        if known_errors > 0:
+            known_ew.append(f"E {known_errors} ({known_errors / known_conn * 100:.1f}%)" if known_conn else f"E {known_errors}")
+        if known_warns > 0:
+            known_ew.append(f"W {known_warns} ({known_warns / known_conn * 100:.1f}%)" if known_conn else f"W {known_warns}")
+        known_ew_str = " · " + ", ".join(known_ew) if known_ew else ""
+        lines.append(f"\n{sep}")
+        lines.append(f"<b>Known:</b> {known_conn:,} conn{known_ew_str}")
+        lines.append(sep)
+        lines.append(_fmt_row("unknown", unknown_data))
+        # Top source IPs for unknown — scanners/probes; skip one-off single hits
+        top_ips = sorted(
+            [(ip, cnt) for ip, cnt in unknown_data.get("peer_ips", {}).items() if cnt > 1],
+            key=lambda x: x[1], reverse=True
+        )[:5]
+        if top_ips:
+            ip_parts = ", ".join(f"{ip} ({cnt})" for ip, cnt in top_ips)
+            lines.append(f"   <i>Top IPs: {ip_parts}</i>")
 
     anomalies = []
     for username, data in sorted_users:
@@ -448,6 +530,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_count = len(get_users(doc))
     proxy_ok, proxy_status = check_proxy()
 
+    keyboard = [[
+        InlineKeyboardButton("📊 Day",   callback_data="stats|day"),
+        InlineKeyboardButton("📅 Week",  callback_data="stats|week"),
+        InlineKeyboardButton("🗓 Month", callback_data="stats|month"),
+    ]]
     await update.message.reply_text(
         "🛰 <b>mtproxy-bot</b>\n\n"
         f"{proxy_status}\n"

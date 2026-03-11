@@ -5,7 +5,7 @@ services:
     container_name: telemt
     restart: unless-stopped
     environment:
-      RUST_LOG: "info"
+      RUST_LOG: "warn,telemt::proxy=info"
     volumes:
       - ./telemt.toml:/etc/telemt.toml:ro
     ports:
@@ -31,10 +31,11 @@ services:
     environment:
       PROXY_HOST: "89.125.209.103"
       PROXY_PORT: "443"
-      TOML_PATH: "/data/telemt.toml"
+      PROXY_DOMAIN: "1c.ru"
+      TOML_PATH: "/config/telemt.toml"
       STATS_PATH: "/data/stats.json"
     volumes:
-      - ./telemt.toml:/data/telemt.toml
+      - ./telemt.toml:/config/telemt.toml
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
