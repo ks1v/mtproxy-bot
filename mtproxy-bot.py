@@ -323,23 +323,6 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"Deleted: {username}", show_alert=True)
         await send_list_page(chat_id, 0, ctx, message_id=message_id)
 
-    elif data.startswith("stats|"):
-        period = data.split("|")[1]
-        if period not in ("day", "week", "month"):
-            return
-        stats = load_stats()
-        if not stats:
-            await ctx.bot.send_message(
-                chat_id=chat_id,
-                text="No stats yet — wait up to 5 minutes for the first cron run.",
-            )
-            return
-        await ctx.bot.send_message(
-            chat_id=chat_id,
-            text=_build_stats_text(period, stats),
-            parse_mode="HTML",
-        )
-
 
 def _aggregate_stats(stats: dict, hours_back: int | None, skip_unknown: bool = True) -> dict:
     """Aggregate stats over the given time window. hours_back=None means all time."""
@@ -348,7 +331,7 @@ def _aggregate_stats(stats: dict, hours_back: int | None, skip_unknown: bool = T
     for username, data in stats.items():
         if skip_unknown and username == "unknown":
             continue
-        conn_total, err_total, err_types = 0, 0, {}
+        conn_total, err_total, warn_total, err_types, peer_ips = 0, 0, 0, {}, {}
         for bucket_key, bucket in data.get("buckets", {}).items():
             if hours_back is not None:
                 try:
@@ -362,8 +345,13 @@ def _aggregate_stats(stats: dict, hours_back: int | None, skip_unknown: bool = T
             warn_total += bucket.get("warnings", 0)
             for etype, count in bucket.get("error_types", {}).items():
                 err_types[etype] = err_types.get(etype, 0) + count
-        if conn_total > 0 or err_total > 0:
-            user_totals[username] = {"conn": conn_total, "errors": err_total, "error_types": err_types}
+            for ip, count in bucket.get("peer_ips", {}).items():
+                peer_ips[ip] = peer_ips.get(ip, 0) + count
+        if conn_total > 0 or err_total > 0 or warn_total > 0:
+            user_totals[username] = {
+                "conn": conn_total, "errors": err_total, "warnings": warn_total,
+                "error_types": err_types, "peer_ips": peer_ips,
+            }
     return user_totals
 
 
@@ -376,10 +364,11 @@ def _format_stats(user_totals: dict, period_label: str) -> str:
     lines = [f"📊 <b>Stats for {period_label}</b>\n"]
 
     for username, data in sorted_users:
-        conn   = data["conn"]
-        errors = data["errors"]
-        rate   = (errors / conn * 100) if conn else 0
-        share  = (conn / total_conn * 100) if total_conn else 0
+        conn     = data["conn"]
+        errors   = data["errors"]
+        warnings = data.get("warnings", 0)
+        rate     = (errors / conn * 100) if conn else 0
+        share    = (conn / total_conn * 100) if total_conn else 0
 
         top_errors = sorted(data["error_types"].items(), key=lambda x: x[1], reverse=True)
         err_str = ""
@@ -391,41 +380,31 @@ def _format_stats(user_totals: dict, period_label: str) -> str:
 
         ew_parts = []
         if errors > 0:
-            ew_parts.append(f"E {errors} ({err_rate:.1f}%)")
+            ew_parts.append(f"E {errors} ({rate:.1f}%)")
         if warnings > 0:
+            warn_rate = (warnings / conn * 100) if conn else 0
             ew_parts.append(f"W {warnings} ({warn_rate:.1f}%)")
         ew_str = " · " + ", ".join(ew_parts) if ew_parts else ""
-        ip_str = f" · {unique_ips} IPs" if unique_ips > 0 else ""
 
-        return (
-            f"👤 <b>{uname}</b>\n"
-            f"   {conn:,} conn ({share:.0f}%){ew_str}{ip_str}{err_str}"
+        lines.append(
+            f"👤 <b>{username}</b>\n"
+            f"   {conn:,} conn ({share:.0f}%){ew_str}{err_str}"
         )
 
-    for username, data in sorted_known:
-        lines.append(_fmt_row(username, data))
+        # For unknown bucket: show top scanner IPs (skip one-off single hits)
+        if username == "unknown":
+            top_ips = sorted(
+                [(ip, cnt) for ip, cnt in data.get("peer_ips", {}).items() if cnt > 1],
+                key=lambda x: x[1], reverse=True
+            )[:5]
+            if top_ips:
+                ip_parts = ", ".join(f"{ip} ({cnt})" for ip, cnt in top_ips)
+                lines.append(f"   <i>Top IPs: {ip_parts}</i>")
 
-    # Separator + known subtotal + unknown pre-auth block
-    if unknown_data is not None:
-        sep = "─" * 22
-        known_ew = []
-        if known_errors > 0:
-            known_ew.append(f"E {known_errors} ({known_errors / known_conn * 100:.1f}%)" if known_conn else f"E {known_errors}")
-        if known_warns > 0:
-            known_ew.append(f"W {known_warns} ({known_warns / known_conn * 100:.1f}%)" if known_conn else f"W {known_warns}")
-        known_ew_str = " · " + ", ".join(known_ew) if known_ew else ""
-        lines.append(f"\n{sep}")
-        lines.append(f"<b>Known:</b> {known_conn:,} conn{known_ew_str}")
-        lines.append(sep)
-        lines.append(_fmt_row("unknown", unknown_data))
-        # Top source IPs for unknown — scanners/probes; skip one-off single hits
-        top_ips = sorted(
-            [(ip, cnt) for ip, cnt in unknown_data.get("peer_ips", {}).items() if cnt > 1],
-            key=lambda x: x[1], reverse=True
-        )[:5]
-        if top_ips:
-            ip_parts = ", ".join(f"{ip} ({cnt})" for ip, cnt in top_ips)
-            lines.append(f"   <i>Top IPs: {ip_parts}</i>")
+    lines.append(
+        f"\n<b>Total:</b> {total_conn:,} conn · "
+        f"{total_errors} errors · {error_rate:.1f}% error rate"
+    )
 
     anomalies = []
     for username, data in sorted_users:
@@ -530,11 +509,6 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_count = len(get_users(doc))
     proxy_ok, proxy_status = check_proxy()
 
-    keyboard = [[
-        InlineKeyboardButton("📊 Day",   callback_data="stats|day"),
-        InlineKeyboardButton("📅 Week",  callback_data="stats|week"),
-        InlineKeyboardButton("🗓 Month", callback_data="stats|month"),
-    ]]
     await update.message.reply_text(
         "🛰 <b>mtproxy-bot</b>\n\n"
         f"{proxy_status}\n"
