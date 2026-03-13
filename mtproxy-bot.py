@@ -9,6 +9,7 @@ import json
 import secrets
 import socket
 import logging
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -144,6 +145,19 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Primary interface: plain text message = username lookup/create."""
     text = update.message.text.strip()
     if text.startswith("/"):
+        return
+    ltext = text.lower()
+    if ltext in ("week", "month", "all"):
+        await _reply_stats(update, ltext)
+        return
+    if ltext == "unknowns":
+        await _reply_unknowns(update)
+        return
+    if ltext == "list":
+        await send_list_page(update.effective_chat.id, 0, ctx)
+        return
+    if ltext in ("revoke", "batch"):
+        await update.message.reply_text(f"Usage: /{ltext} @username")
         return
     usernames = parse_usernames(text)
     if not usernames:
@@ -386,20 +400,31 @@ def _format_stats(user_totals: dict, period_label: str) -> str:
             ew_parts.append(f"W {warnings} ({warn_rate:.1f}%)")
         ew_str = " · " + ", ".join(ew_parts) if ew_parts else ""
 
+        unique_ips = len({k.split(":")[0] for k in data.get("peer_ips", {})})
+        ip_str = f" · {unique_ips} IPs" if unique_ips else ""
+
         lines.append(
             f"👤 <b>{username}</b>\n"
-            f"   {conn:,} conn ({share:.0f}%){ew_str}{err_str}"
+            f"   {conn:,} conn ({share:.0f}%){ip_str}{ew_str}{err_str}"
         )
 
-        # For unknown bucket: show top scanner IPs (skip one-off single hits)
+        # For unknown bucket: top-10 IPs grouped by bare IP, with unique ports
         if username == "unknown":
-            top_ips = sorted(
-                [(ip, cnt) for ip, cnt in data.get("peer_ips", {}).items() if cnt > 1],
-                key=lambda x: x[1], reverse=True
-            )[:5]
-            if top_ips:
-                ip_parts = ", ".join(f"{ip} ({cnt})" for ip, cnt in top_ips)
-                lines.append(f"   <i>Top IPs: {ip_parts}</i>")
+            ip_data: dict[str, dict] = {}
+            for peer, cnt in data.get("peer_ips", {}).items():
+                parts = peer.rsplit(":", 1)
+                ip = parts[0]
+                port = parts[1] if len(parts) > 1 else None
+                if ip not in ip_data:
+                    ip_data[ip] = {"count": 0, "ports": set()}
+                ip_data[ip]["count"] += cnt
+                if port:
+                    ip_data[ip]["ports"].add(port)
+            top_ips = sorted(ip_data.items(), key=lambda x: x[1]["count"], reverse=True)[:10]
+            for tip, d in top_ips:
+                ports_str = ", ".join(sorted(d["ports"], key=lambda p: int(p) if p.isdigit() else 0))
+                port_info = f" [{ports_str}]" if ports_str else ""
+                lines.append(f"   <code>{tip}</code> ({d['count']}){port_info}")
 
     lines.append(
         f"\n<b>Total:</b> {total_conn:,} conn · "
@@ -424,6 +449,37 @@ def _format_stats(user_totals: dict, period_label: str) -> str:
     return "\n".join(lines)
 
 
+async def _reply_stats(update: Update, period: str):
+    stats = load_stats()
+    if not stats:
+        await update.message.reply_text(
+            "No stats yet — wait up to 5 minutes for the first cron run."
+        )
+        return
+    hours_back, period_label = {
+        "week":  (24*7,  "7 days"),
+        "month": (24*30, "30 days"),
+        "all":   (None,  "all time"),
+    }[period]
+    user_totals = _aggregate_stats(stats, hours_back, skip_unknown=True)
+    if not user_totals:
+        await update.message.reply_text(f"No data for {period_label}.")
+        return
+    await update.message.reply_text(_format_stats(user_totals, period_label), parse_mode="HTML")
+
+
+async def _reply_unknowns(update: Update):
+    stats = load_stats()
+    if not stats or "unknown" not in stats:
+        await update.message.reply_text("No data for unknown connections.")
+        return
+    user_totals = _aggregate_stats({"unknown": stats["unknown"]}, hours_back=None, skip_unknown=False)
+    if not user_totals:
+        await update.message.reply_text("No unknown connections recorded.")
+        return
+    await update.message.reply_text(_format_stats(user_totals, "all time (unknowns)"), parse_mode="HTML")
+
+
 @owner_only
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/stats week|month|all"""
@@ -431,42 +487,52 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if period not in ("week", "month", "all"):
         await update.message.reply_text("Usage: /stats week|month|all")
         return
-
-    stats = load_stats()
-    if not stats:
-        await update.message.reply_text(
-            "No stats yet — wait up to 5 minutes for the first cron run."
-        )
-        return
-
-    hours_back, period_label = {
-        "week":  (24*7,  "7 days"),
-        "month": (24*30, "30 days"),
-        "all":   (None,  "all time"),
-    }[period]
-
-    user_totals = _aggregate_stats(stats, hours_back, skip_unknown=True)
-    if not user_totals:
-        await update.message.reply_text(f"No data for {period_label}.")
-        return
-
-    await update.message.reply_text(_format_stats(user_totals, period_label), parse_mode="HTML")
+    await _reply_stats(update, period)
 
 
 @owner_only
 async def cmd_unknowns(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/unknowns — all-time stats for the 'unknown' user bucket"""
-    stats = load_stats()
-    if not stats or "unknown" not in stats:
-        await update.message.reply_text("No data for unknown connections.")
+    await _reply_unknowns(update)
+
+
+@owner_only
+async def cmd_active(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/active — users who had a successful handshake in the last 15 minutes"""
+    window = "15m"
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "telemt", "--timestamps", "--since", window],
+            capture_output=True, text=True, timeout=15,
+        )
+        raw = result.stderr or result.stdout
+    except Exception as e:
+        await update.message.reply_text(f"Could not read logs: {e}")
         return
 
-    user_totals = _aggregate_stats({"unknown": stats["unknown"]}, hours_back=None, skip_unknown=False)
-    if not user_totals:
-        await update.message.reply_text("No unknown connections recorded.")
+    ansi   = re.compile(r"\x1b\[[0-9;]*m")
+    re_ts  = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
+    re_usr = re.compile(r"user=(\S+)")
+
+    seen: dict[str, str] = {}  # username → latest handshake timestamp
+    for raw_line in raw.splitlines():
+        line = ansi.sub("", raw_line).strip()
+        if "MTProto handshake successful" not in line:
+            continue
+        m_ts  = re_ts.search(line)
+        m_usr = re_usr.search(line)
+        if m_ts and m_usr:
+            seen[m_usr.group(1)] = m_ts.group(1)
+
+    if not seen:
+        await update.message.reply_text(f"No connections in the last {window}.")
         return
 
-    await update.message.reply_text(_format_stats(user_totals, "all time (unknowns)"), parse_mode="HTML")
+    lines = [f"🟢 <b>Active last {window}</b>\n"]
+    for username, ts in sorted(seen.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"👤 <b>{username}</b> — {ts[11:19]}")
+    lines.append("\n<i>Shows last handshake; disconnects are not logged by telemt.</i>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 def _shorten_error(error: str) -> str:
@@ -496,9 +562,9 @@ def check_proxy() -> tuple[bool, str]:
 
 
 _REPLY_KEYBOARD = ReplyKeyboardMarkup(
-    [["/revoke", "/batch"],
-     ["/list",   "/unknowns"],
-     ["/stats week", "/stats month", "/stats all"]],
+    [["Revoke", "Batch"],
+     ["List",   "Unknowns"],
+     ["Week",   "Month",   "All"]],
     resize_keyboard=True,
 )
 
@@ -529,6 +595,7 @@ def main():
     app.add_handler(CommandHandler("list",     cmd_list))
     app.add_handler(CommandHandler("stats",    cmd_stats))
     app.add_handler(CommandHandler("unknowns", cmd_unknowns))
+    app.add_handler(CommandHandler("active",   cmd_active))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
