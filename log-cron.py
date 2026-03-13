@@ -99,8 +99,10 @@ def process_lines(lines: list[str], stats: dict) -> tuple[dict, str | None]:
         m_user = RE_USER.search(line)
         username = m_user.group(1) if m_user else "unknown"
 
-        # Skip internal/infrastructure lines with no real user context
-        if username == "unknown" and "telemt::transport" in line:
+        # Skip benign infrastructure INFO lines with no user context;
+        # keep WARN/ERROR lines so pre-auth failures reach the unknown bucket
+        if username == "unknown" and "telemt::transport" in line \
+                and "WARN" not in line and "ERROR" not in line:
             continue
 
         # Ensure structure
